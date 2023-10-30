@@ -15,7 +15,7 @@ csapp.o: src/csapp/csapp.c
 	"$(CC)"	$(CFLAGS) -c $^
 
 db_server : node.o utils.o csapp.o
-	"$(CC)" $(CFLAGS) -o $@ $^
+	"$(CC)" $(CFLAGS) -o $@ $^ -lpthread -lrt
 
 .PHONY: clean
 

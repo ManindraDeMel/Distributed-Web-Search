@@ -3,6 +3,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdbool.h>
 
 // You may assume that all requests sent to a node are less than this length
 #define REQUESTLINELEN 128
@@ -11,6 +12,20 @@
 // Cache related constants
 #define MAX_OBJECT_SIZE 512 // object here refers to the posting list or result list being cached
 #define MAX_CACHE_SIZE MAX_OBJECT_SIZE*128
+#define PARTITION_SIZE 100
+
+// Assumed data structures
+typedef struct {
+    char key[REQUESTLINELEN];
+    char value[MAX_OBJECT_SIZE];
+} KeyValuePair;
+
+// A dynamic list to manage cache. You can use an array but a linked list would allow 
+// more flexibility in cache management, especially for LRU eviction.
+typedef struct CacheItem {
+    KeyValuePair data;
+    struct CacheItem* next;
+} CacheItem;
 
 /* This struct contains all information needed for each node */
 typedef struct node_info {
@@ -18,6 +33,20 @@ typedef struct node_info {
   int port_number; // port number
   int listen_fd;   // file descriptor of socket the node is using
 } node_info;
+
+typedef enum {
+    LIVE, 
+    DEAD
+} node_status;
+
+typedef struct node_info_extended {
+    node_info base_info; // Basic node information
+    // Key-value store for the partition
+
+    // Cache for storing recent queries and results
+
+    node_status status; // Status of the node (LIVE/DEAD)
+} node_info_extended;
 
 /* Variables that all nodes will share */
 
@@ -32,9 +61,12 @@ int TOTAL_NODES = 0;
 // A dynamically allocated array of TOTAL_NODES node_info structs.
 // The parent process creates this and populates it's values so when it creates
 // the nodes, they each know what port number the others are using.
-node_info *NODES = NULL;
+node_info_extended *NODES = NULL;
 
 /* ------------  Variables specific to each child process / node ------------ */
+
+CacheItem* cache_head = NULL;
+int current_cache_size = 0;
 
 // After forking each node (one child process) changes the value of this variable
 // to their own node id.
@@ -61,9 +93,141 @@ database partition = {NULL, 0, NULL};
  *         - Set the global partition variable. 
  */
 void request_partition(void) {
-  // TODO: implement this function. 
+    int client_fd;
+    char request[REQUESTLINELEN];
+    char responseline[REQUESTLINELEN];
+    rio_t rio;
+    Rio_readinitb(&rio, client_fd);
+
+    // Connect to the parent process
+    char port_str[6]; // Max 5 digits for a port and the null terminator
+    sprintf(port_str, "%d", PARENT_PORT);
+    client_fd = Open_clientfd(HOSTNAME, port_str);
+    
+    // Send a request line to the parent with the node's ID
+    sprintf(request, "%d\n", NODE_ID);
+    Rio_writen(client_fd, request, strlen(request));
+
+    // Read the response from the parent
+    Rio_readlineb(&rio, responseline, REQUESTLINELEN);
+    int size = atoi(responseline);
+    
+    // Allocate memory for partition data and read it from the socket
+    partition.m_ptr = (char *) Malloc(size);
+    Rio_readnb(&rio, partition.m_ptr, size);
+
+
+    // Close the client file descriptor
+    Close(client_fd);
+}
+// 1. Check if key exists in partition
+bool key_exists_in_partition(char* key, int node_id) {
+    int index = find_entry(&partition, key);
+    return (index != -1);
+}
+// 2. Check if key exists in cache
+bool key_exists_in_cache(char* key, int node_id) {
+    CacheItem* current = cache_head;
+    while (current != NULL) {
+        if (strcmp(current->data.key, key) == 0) {
+            return true;
+        }
+        current = current->next;
+    }
+    return false;
 }
 
+/**
+ * @brief Determines the target node for the given request.
+ * 
+ * @param request The request whose target node needs to be determined.
+ * @return The ID of the target node.
+ */
+int determine_target_node(char* request) {
+    unsigned int hash_value = 0;
+    char *ptr = request;
+    
+    // Simple hash calculation: sum of ASCII values of characters in the request.
+    while (*ptr) {
+        hash_value += *ptr;
+        ptr++;
+    }
+
+    // Modulus with the total number of nodes to get the target node ID.
+    return hash_value % TOTAL_NODES;
+}
+
+
+// Function to remove the oldest item from the cache (LRU eviction)
+void remove_oldest_from_cache() {
+    CacheItem* to_remove = cache_head;
+    cache_head = cache_head->next;
+    free(to_remove);
+    current_cache_size -= MAX_OBJECT_SIZE; // Assume each cache item uses the full object size
+}
+
+// Add an item to cache
+void add_to_cache(char* key, char* value) {
+    if (current_cache_size + MAX_OBJECT_SIZE > MAX_CACHE_SIZE) {
+        remove_oldest_from_cache();
+    }
+
+    CacheItem* new_item = malloc(sizeof(CacheItem));
+    strncpy(new_item->data.key, key, REQUESTLINELEN);
+    strncpy(new_item->data.value, value, MAX_OBJECT_SIZE);
+    new_item->next = cache_head;
+    cache_head = new_item;
+
+    current_cache_size += MAX_OBJECT_SIZE;
+}
+
+// 3. Forward request to another node
+void forward_request_to_node(char* request, int target_node_id) {
+    // Use NODES[target_node_id] to get the node's metadata
+    node_info_extended target_node = NODES[target_node_id];
+    
+    struct sockaddr_in serveraddr;
+    int clientfd;
+    rio_t rio;
+
+    if ((clientfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
+        perror("Socket error");
+        exit(1);
+    }
+
+    bzero((char*) &serveraddr, sizeof(serveraddr));
+    serveraddr.sin_family = AF_INET;
+    inet_pton(AF_INET, HOSTNAME, &(serveraddr.sin_addr));
+    serveraddr.sin_port = htons(target_node.base_info.port_number);
+
+    if (connect(clientfd, (struct sockaddr*) &serveraddr, sizeof(serveraddr)) < 0) {
+        perror("Connect error");
+        exit(1);
+    }
+
+    Rio_readinitb(&rio, clientfd);
+    Rio_writen(clientfd, request, strlen(request));
+    
+    // Not handling response here. You may want to read the response 
+    // and either cache it, or forward it back to the original client.
+    close(clientfd);
+}
+void handle_request(char* request, int client_fd, int node_id) {
+    if (key_exists_in_partition(request, node_id)) {
+        // Fetch from partition and respond
+    } else if (key_exists_in_cache(request, node_id)) {
+        // Fetch from cache and respond
+    } else {
+        // Forward to another node or return a graceful failure message
+        int target_node_id = determine_target_node(request); 
+        if (NODES[target_node_id].status == LIVE) {
+            forward_request_to_node(request, target_node_id);
+        } else {
+            char failure_msg[] = "Key not found in the system.";
+            Rio_writen(client_fd, failure_msg, strlen(failure_msg));
+        }
+    }
+}
 /** @brief The main server loop for a node. This will be called by a node after
  *         it has finished the digest phase. The server will run indefinitely,
  *         responding to requests. Each request is a single line. 
@@ -73,8 +237,22 @@ void request_partition(void) {
  *         NODES[NODE_ID].listen_fd. 
 */
 void node_serve(void) {
-  // TODO: implement this function. 
+    int client_fd;
+    char request[REQUESTLINELEN];
+    rio_t rio;
+
+    while (1) {
+        client_fd = Accept(NODES[NODE_ID].base_info.listen_fd, NULL, NULL);
+        Rio_readinitb(&rio, client_fd);
+
+        if (Rio_readlineb(&rio, request, REQUESTLINELEN) != 0) {
+            handle_request(request, client_fd, NODE_ID);
+        }
+
+        Close(client_fd);
+    }
 }
+
 
 /** @brief Called after a child process is forked. Initialises all information
  *         needed by an individual node. It then calls request_partition to get
@@ -92,7 +270,7 @@ void start_node(int node_id) {
   // close all listen_fds except the one that this node should use.
   for (int n = 0; n < TOTAL_NODES; n++) {
     if (n != NODE_ID)
-      Close(NODES[n].listen_fd);
+      Close(NODES[n].base_info.listen_fd);
   }
 
   request_partition();
@@ -238,7 +416,7 @@ int main(int argc, char const *argv[]) {
     exit(1);
   }
 
-  NODES = calloc(TOTAL_NODES, sizeof(node_info));
+  NODES = calloc(TOTAL_NODES, sizeof(node_info_extended));
   parent_connfd = get_listenfd(&start_port);
   PARENT_PORT = start_port;
 
@@ -249,9 +427,9 @@ int main(int argc, char const *argv[]) {
       fprintf(stderr, "get_listenfd error\n");
       exit(1);
     }
-    NODES[n].listen_fd = n_connfd;
-    NODES[n].node_id = n;
-    NODES[n].port_number = start_port;
+    NODES[n].base_info.listen_fd = n_connfd;
+    NODES[n].base_info.node_id = n;
+    NODES[n].base_info.port_number = start_port;
   }
 
   // Begin forking all child processes.
@@ -261,14 +439,14 @@ int main(int argc, char const *argv[]) {
       start_node(n);
       exit(1);
     } else {
-      node_info node = NODES[n];
-      fprintf(stderr, "NODE %d [PID: %d] listening on port %d\n", n, pid, node.port_number);
+      node_info_extended node = NODES[n];
+      fprintf(stderr, "NODE %d [PID: %d] listening on port %d\n", n, pid, node.base_info.port_number);
     }
   }
 
   // Parent closes all fd's that belong to it's children
   for (int n = 0; n < TOTAL_NODES; n++)
-    Close(NODES[n].listen_fd);
+    Close(NODES[n].base_info.listen_fd);
 
   // Parent can now begin waiting for children to send messages to contact.
   parent_serve((char *) argv[3], parent_connfd);
