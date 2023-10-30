@@ -97,12 +97,13 @@ void request_partition(void) {
     char request[REQUESTLINELEN];
     char responseline[REQUESTLINELEN];
     rio_t rio;
-    Rio_readinitb(&rio, client_fd);
 
     // Connect to the parent process
     char port_str[6]; // Max 5 digits for a port and the null terminator
     sprintf(port_str, "%d", PARENT_PORT);
     client_fd = Open_clientfd(HOSTNAME, port_str);
+
+    Rio_readinitb(&rio, client_fd);
     
     // Send a request line to the parent with the node's ID
     sprintf(request, "%d\n", NODE_ID);
@@ -212,11 +213,34 @@ void forward_request_to_node(char* request, int target_node_id) {
     // and either cache it, or forward it back to the original client.
     close(clientfd);
 }
+// void handle_request(char* request, int client_fd, int node_id) {
+//     if (key_exists_in_partition(request, node_id)) {
+//         // Fetch from partition and respond
+//     } else if (key_exists_in_cache(request, node_id)) {
+//         // Fetch from cache and respond
+//     } else {
+//         // Forward to another node or return a graceful failure message
+//         int target_node_id = determine_target_node(request); 
+//         if (NODES[target_node_id].status == LIVE) {
+//             forward_request_to_node(request, target_node_id);
+//         } else {
+//             char failure_msg[] = "Key not found in the system.";
+//             Rio_writen(client_fd, failure_msg, strlen(failure_msg));
+//         }
+//     }
+// }
 void handle_request(char* request, int client_fd, int node_id) {
     if (key_exists_in_partition(request, node_id)) {
         // Fetch from partition and respond
+        char success_msg[] = "Key found in the partition.";
+        Rio_writen(client_fd, success_msg, strlen(success_msg));
+        printf("Attempted to write %zu bytes to client. (success in partition)\n", strlen(success_msg));
+
     } else if (key_exists_in_cache(request, node_id)) {
         // Fetch from cache and respond
+        char success_msg[] = "Key found in the cache.";
+        Rio_writen(client_fd, success_msg, strlen(success_msg));
+        printf("Attempted to write %zu bytes to client. (success in cache)\n", strlen(success_msg));
     } else {
         // Forward to another node or return a graceful failure message
         int target_node_id = determine_target_node(request); 
@@ -225,9 +249,11 @@ void handle_request(char* request, int client_fd, int node_id) {
         } else {
             char failure_msg[] = "Key not found in the system.";
             Rio_writen(client_fd, failure_msg, strlen(failure_msg));
+            printf("Attempted to write %zu bytes to client. (with failure)\n", strlen(failure_msg));
         }
     }
 }
+
 /** @brief The main server loop for a node. This will be called by a node after
  *         it has finished the digest phase. The server will run indefinitely,
  *         responding to requests. Each request is a single line. 
@@ -240,9 +266,14 @@ void node_serve(void) {
     int client_fd;
     char request[REQUESTLINELEN];
     rio_t rio;
-
     while (1) {
+        fprintf(stderr, "Node %d serving", NODE_ID);
+        fflush(stderr); 
         client_fd = Accept(NODES[NODE_ID].base_info.listen_fd, NULL, NULL);
+
+        fprintf(stderr, "Node %d: Received a connection on client_fd %d\n", NODE_ID, client_fd);    
+        fflush(stderr); 
+        
         Rio_readinitb(&rio, client_fd);
 
         if (Rio_readlineb(&rio, request, REQUESTLINELEN) != 0) {
@@ -265,6 +296,8 @@ void node_serve(void) {
  *         number this is. The global NODE_ID variable will be set to this value
  */
 void start_node(int node_id) {
+  fprintf(stderr, "Starting node %d...\n", node_id);
+  fflush(stderr);
   NODE_ID = node_id;
 
   // close all listen_fds except the one that this node should use.
@@ -434,7 +467,17 @@ int main(int argc, char const *argv[]) {
 
   // Begin forking all child processes.
   for (int n = 0; n < TOTAL_NODES; n++) {
-    if ((pid = Fork()) == 0) { // child process
+    pid = fork();
+    if (pid == 0) { // child process
+      char log_filename[256];
+      sprintf(log_filename, "node_%d.log", n);
+      FILE *out = freopen(log_filename, "w", stdout);
+      FILE *err = freopen(log_filename, "w", stderr);
+
+      if (!out || !err) {
+        exit(EXIT_FAILURE);  // Exit if the redirection failed.
+      }
+
       Close(parent_connfd);
       start_node(n);
       exit(1);
