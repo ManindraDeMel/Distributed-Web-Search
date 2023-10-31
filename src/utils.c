@@ -416,7 +416,7 @@ void trim_extraneous_chars(char *str) {
 }
 
 
-//THREADS
+// THREADS
 
 // Thread function
 void* threadpool_thread(void* threadpool) {

@@ -10,10 +10,9 @@ declaration: >-
   own work except for the references listed below
 
 # sign *your* name and uid here
-name: 
-uid: 
+name: Manindra de Mel
+uid: u7156805
 
 # list numbered references below (replace the example with your own references) 
 ---
 # References
-- [1] Example Author. 2023. example code video. Retrieved from https://example.com/video
