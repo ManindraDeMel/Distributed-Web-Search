@@ -20,3 +20,5 @@ output/
 *.exe
 *.dSYM
 .DS_STORE
+
+node_*.log
