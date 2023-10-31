@@ -153,7 +153,7 @@ void add_to_cache(char* key, char* value) {
     current_cache_size += MAX_OBJECT_SIZE;
 }
 
-void forward_request_to_node(char* request, int target_node_id, int original_client_fd) {
+value_array* forward_request_to_node(char* request, int target_node_id) {
     node_info_extended target_node = NODES[target_node_id];
     
     struct sockaddr_in serveraddr;
@@ -206,11 +206,12 @@ void forward_request_to_node(char* request, int target_node_id, int original_cli
         close(clientfd);
         return; 
     }
-
-    // Send the response back to the original client
-    Rio_writen(original_client_fd, response_buffer, response_length);
-
     close(clientfd);
+    // Convert the response_buffer to value_array using the provided function
+    value_array* response_va = create_value_array(response_buffer);
+
+    // Return the value_array
+    return response_va;
 }
 
 
@@ -230,7 +231,7 @@ void handle_single_request(char* request, int client_fd, int node_id, value_arra
             fprintf(stderr, "\tForwarding: %s to node %d", request, target_node_id); // Display the content of the request
             fflush(stderr);
             // Forward request to the target node and get the value array
-            forward_request_to_node(request, target_node_id, client_fd);
+            *value_result = forward_request_to_node(request, target_node_id);
         }
     }
 }
