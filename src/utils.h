@@ -1,4 +1,6 @@
 #include <sys/types.h>
+#include <pthread.h>
+#include <stdint.h>
 
 #define NUM_BUCKETS 8191
 #define KEY_SPACE (((int) 'z') - ((int) '0'))
@@ -10,6 +12,8 @@
 #define PORT_STRLEN 6
 #define MAX_PORTNUM 65535
 
+#define NUM_THREADS 8      // Number of threads in the pool
+#define QUEUE_SIZE 64      // Size of the request queue
 // A single bucket in the hash table. 
 // Since word points directly into the memory-mapped database, there is no need
 // to explicitly keep track of the offset.
@@ -34,6 +38,31 @@ typedef struct database {
   size_t db_size;      /* size of db in bytes */
   hash_table *h_table; /* hash table used to efficiently search the database */
 } database;
+
+// Define a task structure
+typedef struct {
+    void (*function)(void* p);
+    void* data;
+} threadpool_task_t;
+
+// Define the thread pool structure
+typedef struct {
+    pthread_mutex_t lock;
+    pthread_cond_t notify;
+    pthread_t* threads;
+    threadpool_task_t* queue;
+    int thread_count;
+    int queue_size;
+    int head;
+    int tail;
+    int count;
+    int shutdown;
+} threadpool_t;
+
+threadpool_t* threadpool_create(int thread_count, int queue_size);
+int threadpool_add(threadpool_t* pool, void (*function)(void*), void* data);
+int threadpool_destroy(threadpool_t* pool, int flags);
+void* threadpool_thread(void* threadpool);
 
 /* -------------------- Parent Process Helper Functions --------------------- */
 

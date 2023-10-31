@@ -40,10 +40,6 @@ typedef enum {
 
 typedef struct node_info_extended {
     node_info base_info; // Basic node information
-    // Key-value store for the partition
-
-    // Cache for storing recent queries and results
-
     node_status status; // Status of the node (LIVE/DEAD)
 } node_info_extended;
 
@@ -211,31 +207,8 @@ void handle_single_request(char* request, int client_fd, int node_id, value_arra
         if (target_node_id == node_id) {
             *value_result = NULL; // No value found for this request
         } else {
-            // TODO: Forward request to the target node and get the value array
-            *value_result = NULL; // Placeholder
-              // else {
-              //     // Forward to another node or return a graceful failure message
-              //     int target_node_id = find_node(request, TOTAL_NODES); 
-
-              //     if (target_node_id == node_id) {
-              //         char response_msg[256]; // Adjust size as needed
-              //         snprintf(response_msg, sizeof(response_msg), "%s not found", request);
-              //         Rio_writen(client_fd, response_msg, strlen(response_msg));
-              //         fprintf(stderr, "Attempted to write %zu bytes to client. (key not found: %s)\n", strlen(response_msg), request);
-              //         fflush(stderr); 
-              //     } else {
-              //         fprintf(stderr, "Forwarding request to node %d", target_node_id);
-              //         fflush(stderr); 
-              //         if (NODES[target_node_id].status == LIVE) {
-              //             forward_request_to_node(request, target_node_id, client_fd);
-              //         } else {
-              //             char failure_msg[] = "Key not found in the system.";
-              //             Rio_writen(client_fd, failure_msg, strlen(failure_msg));
-              //             fprintf(stderr, "Attempted to write %zu bytes to client. (with failure)\n", strlen(failure_msg));
-              //             fflush(stderr); 
-              //         }
-              //     }
-              // }
+            // Forward request to the target node and get the value array
+            forward_request_to_node(request, target_node_id, value_result);
         }
     }
 }
@@ -307,6 +280,19 @@ void handle_request(char* request, int client_fd, int node_id) {
     Rio_writen(client_fd, response_msg, wl);
 }
 
+
+void handle_request_wrapper(void* data) {
+    int client_fd = (int)(intptr_t)data;
+    char request[REQUESTLINELEN] = {0};
+    rio_t rio;
+    Rio_readinitb(&rio, client_fd);
+    Rio_readlineb(&rio, request, sizeof(request) - 1);
+    if (strlen(request) > 0) {
+        handle_request(request, client_fd, NODE_ID);
+    }
+    Close(client_fd);
+}
+
 /** @brief The main server loop for a node. This will be called by a node after
  *         it has finished the digest phase. The server will run indefinitely,
  *         responding to requests. Each request is a single line. 
@@ -317,33 +303,15 @@ void handle_request(char* request, int client_fd, int node_id) {
 */
 void node_serve(void) {
     int client_fd;
-    char request[REQUESTLINELEN] = {0};  // Assuming this is large enough for the entire request
-    char buffer[REQUESTLINELEN] = {0};
-    rio_t rio;
+    threadpool_t* pool = threadpool_create(NUM_THREADS, QUEUE_SIZE); // Create the pool
+
     while (1) {
-      fprintf(stderr, "Node %d serving", NODE_ID);
-      fflush(stderr); 
-      client_fd = Accept(NODES[NODE_ID].base_info.listen_fd, NULL, NULL);
+        client_fd = Accept(NODES[NODE_ID].base_info.listen_fd, NULL, NULL);
+        // Add client_fd to the thread pool task queue
+        threadpool_add(pool, handle_request_wrapper, (void*)(intptr_t)client_fd);
+    }
 
-      fprintf(stderr, "Node %d: Received a connection on client_fd %d\n", NODE_ID, client_fd);    
-      fflush(stderr); 
-
-      Rio_readinitb(&rio, client_fd);
-      Rio_readlineb(&rio, buffer, sizeof(buffer) - 1);
-
-      // Find length until first '\000' character
-      size_t data_len = strnlen(rio.rio_buf, sizeof(rio.rio_buf));
-
-      // Just copying from rio.rio_buf to our request buffer
-      strncpy(request, rio.rio_buf, data_len);
-      request[data_len] = '\0'; // Null-terminate the request buffer
-      trim_extraneous_chars(request);
-      if (strlen(request) > 0) {
-          handle_request(request, client_fd, NODE_ID);
-      }
-
-      Close(client_fd);
-  }
+    threadpool_destroy(pool, 0); // Graceful shutdown
 }
 
 
