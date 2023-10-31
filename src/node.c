@@ -270,13 +270,25 @@ void handle_request(char* request, int client_fd, int node_id) {
             handle_single_request(key1, client_fd, node_id, &values1);
             handle_single_request(key2, client_fd, node_id, &values2);
 
-            value_array *intersection = get_intersection(values1, values2);
-            if (intersection && intersection->len > 0) {
-                wl += snprintf(response_msg + wl, sizeof(response_msg) - wl, "%s,%s", key1, key2);
-                wl += value_array_to_str(intersection, response_msg + wl, sizeof(response_msg) - wl);
-                free(intersection);
+            if (!values1 && !values2) {
+                // Both keys are not present
+                wl += snprintf(response_msg + wl, sizeof(response_msg) - wl, "%s not found\n%s not found\n", key1, key2);
+            } else if (!values1) {
+                // Only the first key is not present
+                wl += snprintf(response_msg + wl, sizeof(response_msg) - wl, "%s not found\n", key1);
+            } else if (!values2) {
+                // Only the second key is not present
+                wl += snprintf(response_msg + wl, sizeof(response_msg) - wl, "%s not found\n", key2);
             } else {
-                wl += snprintf(response_msg + wl, sizeof(response_msg) - wl, "%s,%s\n", key1, key2);
+                // Both keys are present, now compute the intersection
+                value_array *intersection = get_intersection(values1, values2);
+                if (intersection && intersection->len > 0) {
+                    wl += snprintf(response_msg + wl, sizeof(response_msg) - wl, "%s,%s", key1, key2);
+                    wl += value_array_to_str(intersection, response_msg + wl, sizeof(response_msg) - wl);
+                    free(intersection);
+                } else {
+                    wl += snprintf(response_msg + wl, sizeof(response_msg) - wl, "%s,%s\n", key1, key2);
+                }
             }
 
         } else { // Single query
