@@ -408,3 +408,9 @@ int port_number_to_str(int port, char *buff) {
 }
 
 // NODE UTILS
+void trim_extraneous_chars(char *str) {
+    char *last_newline = strrchr(str, '\n'); // Find last occurrence of newline
+    if (last_newline) {
+        *(last_newline + 1) = '\0'; // Null-terminate the string right after the last newline
+    }
+}

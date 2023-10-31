@@ -1,8 +1,8 @@
-Starting node 0...
-Node 0 servingNode 0: Received a connection on client_fd 3
-Received request: ã ﬂ_·ıd·ev<rays>
-Token [1]: ã ﬂ_·ıd·ev<rays>
-Node 0 servingNode 0: Received a connection on client_fd 3
+Starting node 1...
+Node 1 servingNode 1: Received a connection on client_fd 3
+Received request: )
+Token [1]: )
+Node 1 servingNode 1: Received a connection on client_fd 3
 Received request: 0
 0
 05

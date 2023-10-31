@@ -12,7 +12,7 @@
 // Cache related constants
 #define MAX_OBJECT_SIZE 512 // object here refers to the posting list or result list being cached
 #define MAX_CACHE_SIZE MAX_OBJECT_SIZE*128
-
+#define MAX_REQUESTS 128
 // Assumed data structures
 typedef struct {
     char key[REQUESTLINELEN];
@@ -197,50 +197,102 @@ void forward_request_to_node(char* request, int target_node_id, int original_cli
 
     close(clientfd);
 }
-void handle_request(char* request, int client_fd, int node_id) {
+
+void handle_single_request(char* request, int client_fd, int node_id, value_array **value_result) {
     request_line_to_key(request);
     char *entry;
-    char *response_msg;
     if ((entry = find_entry(&partition, request)) != NULL) {
-        // Extract value from the entry using get_value_array
-        value_array *values = get_value_array(entry);
-        
-        if (values) {
-            char response_msg[1024]; // Adjust the size as needed
-            int wl = snprintf(response_msg, sizeof(response_msg), "%s", entry); // Start with the entry
-            // Append the associated values to the buffer
-            wl += value_array_to_str(values, response_msg + wl, sizeof(response_msg) - wl);
-            
-            Rio_writen(client_fd, response_msg, wl);
-            fprintf(stderr,"Attempted to write %zu bytes to client. (value: %s)\n", wl, response_msg);
-            fflush(stderr);
-        } else {
-            char failure_msg[] = "Unable to retrieve value from entry.";
-            Rio_writen(client_fd, failure_msg, strlen(failure_msg));
-            fprintf(stderr, "Attempted to write %zu bytes to client. (with failure)\n", strlen(failure_msg));
-            fflush(stderr); 
-        }
-
+        *value_result = get_value_array(entry);
     } else if (key_exists_in_cache(request, node_id)) {
-        // Fetch from cache and respond
-        char success_msg[] = "Key found in the cache.";
-        Rio_writen(client_fd, success_msg, strlen(success_msg));
-        fprintf(stderr, "Attempted to write %zu bytes to client. (success in cache)\n", strlen(success_msg));
-        fflush(stderr); 
+        // TODO: Retrieve value array from cache if needed
+        *value_result = NULL; // Placeholder
     } else {
-        // Forward to another node or return a graceful failure message
         int target_node_id = find_node(request, TOTAL_NODES); 
-        fprintf(stderr, "Forwarding request to node %d", target_node_id);
-        fflush(stderr); 
-        if (NODES[target_node_id].status == LIVE) {
-            forward_request_to_node(request, target_node_id, client_fd);
+        if (target_node_id == node_id) {
+            *value_result = NULL; // No value found for this request
         } else {
-            char failure_msg[] = "Key not found in the system.";
-            Rio_writen(client_fd, failure_msg, strlen(failure_msg));
-            fprintf(stderr, "Attempted to write %zu bytes to client. (with failure)\n", strlen(failure_msg));
-            fflush(stderr); 
+            // TODO: Forward request to the target node and get the value array
+            *value_result = NULL; // Placeholder
+              // else {
+              //     // Forward to another node or return a graceful failure message
+              //     int target_node_id = find_node(request, TOTAL_NODES); 
+
+              //     if (target_node_id == node_id) {
+              //         char response_msg[256]; // Adjust size as needed
+              //         snprintf(response_msg, sizeof(response_msg), "%s not found", request);
+              //         Rio_writen(client_fd, response_msg, strlen(response_msg));
+              //         fprintf(stderr, "Attempted to write %zu bytes to client. (key not found: %s)\n", strlen(response_msg), request);
+              //         fflush(stderr); 
+              //     } else {
+              //         fprintf(stderr, "Forwarding request to node %d", target_node_id);
+              //         fflush(stderr); 
+              //         if (NODES[target_node_id].status == LIVE) {
+              //             forward_request_to_node(request, target_node_id, client_fd);
+              //         } else {
+              //             char failure_msg[] = "Key not found in the system.";
+              //             Rio_writen(client_fd, failure_msg, strlen(failure_msg));
+              //             fprintf(stderr, "Attempted to write %zu bytes to client. (with failure)\n", strlen(failure_msg));
+              //             fflush(stderr); 
+              //         }
+              //     }
+              // }
         }
     }
+}
+void handle_request(char* request, int client_fd, int node_id) {
+    char* queries[MAX_REQUESTS]; // Assuming some max number of simultaneous requests
+    int num_queries = 0;
+    fprintf(stderr, "Received request: %s\n", request); // Display the content of the request
+    fflush(stderr);
+
+    // Split the request into individual queries
+    char *token = strtok(request, "\n");
+    while (token) {
+        queries[num_queries++] = token;
+        // Display the token using fprintf
+        fprintf(stderr, "Token [%d]: %s\n", num_queries, token);    
+        
+        token = strtok(NULL, "\n");
+    }
+
+    char response_msg[MAX_REQUESTS * 1024] = "";  // Total response message
+    int wl = 0;  // Write length for the response message
+
+    for (int q = 0; q < num_queries; q++) {
+        char* query = queries[q];
+        char *key1 = strtok(query, " ");
+        char *key2 = strtok(NULL, " ");
+
+        if (key2) { // Intersection query
+            value_array *values1 = NULL;
+            value_array *values2 = NULL;
+
+            handle_single_request(key1, client_fd, node_id, &values1);
+            handle_single_request(key2, client_fd, node_id, &values2);
+
+            value_array *intersection = get_intersection(values1, values2);
+            if (intersection && intersection->len > 0) {
+                wl += snprintf(response_msg + wl, sizeof(response_msg) - wl, "%s,%s", key1, key2);
+                wl += value_array_to_str(intersection, response_msg + wl, sizeof(response_msg) - wl);
+                free(intersection);
+            } else {
+                wl += snprintf(response_msg + wl, sizeof(response_msg) - wl, "%s,%s\n", key1, key2);
+            }
+
+        } else { // Single query
+            value_array *values;
+            handle_single_request(key1, client_fd, node_id, &values);
+
+            if (values && values->len > 0) {
+                wl += snprintf(response_msg + wl, sizeof(response_msg) - wl, "%s", key1);
+                wl += value_array_to_str(values, response_msg + wl, sizeof(response_msg) - wl);
+            } else {
+                wl += snprintf(response_msg + wl, sizeof(response_msg) - wl, "%s not found\n", key1);
+            }
+        }
+    }
+
+    Rio_writen(client_fd, response_msg, wl);
 }
 
 /** @brief The main server loop for a node. This will be called by a node after
@@ -253,25 +305,35 @@ void handle_request(char* request, int client_fd, int node_id) {
 */
 void node_serve(void) {
     int client_fd;
-    char request[REQUESTLINELEN];
+    char request[REQUESTLINELEN] = {0};  // Assuming this is large enough for the entire request
+    char buffer[REQUESTLINELEN] = {0};
     rio_t rio;
     while (1) {
-        fprintf(stderr, "Node %d serving", NODE_ID);
-        fflush(stderr); 
-        client_fd = Accept(NODES[NODE_ID].base_info.listen_fd, NULL, NULL);
+      fprintf(stderr, "Node %d serving", NODE_ID);
+      fflush(stderr); 
+      client_fd = Accept(NODES[NODE_ID].base_info.listen_fd, NULL, NULL);
 
-        fprintf(stderr, "Node %d: Received a connection on client_fd %d\n", NODE_ID, client_fd);    
-        fflush(stderr); 
+      fprintf(stderr, "Node %d: Received a connection on client_fd %d\n", NODE_ID, client_fd);    
+      fflush(stderr); 
 
-        Rio_readinitb(&rio, client_fd);
+      Rio_readinitb(&rio, client_fd);
+      Rio_readlineb(&rio, buffer, sizeof(buffer) - 1);
 
-        if (Rio_readlineb(&rio, request, REQUESTLINELEN) != 0) {
-            handle_request(request, client_fd, NODE_ID);
-        }
+      // Find length until first '\000' character
+      size_t data_len = strnlen(rio.rio_buf, sizeof(rio.rio_buf));
 
-        Close(client_fd);
-    }
+      // Just copying from rio.rio_buf to our request buffer
+      strncpy(request, rio.rio_buf, data_len);
+      request[data_len] = '\0'; // Null-terminate the request buffer
+      trim_extraneous_chars(request);
+      if (strlen(request) > 0) {
+          handle_request(request, client_fd, NODE_ID);
+      }
+
+      Close(client_fd);
+  }
 }
+
 
 
 /** @brief Called after a child process is forked. Initialises all information
