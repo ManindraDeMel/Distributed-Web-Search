@@ -8,7 +8,7 @@
 // You may assume that all requests sent to a node are less than this length
 #define REQUESTLINELEN 128
 #define HOSTNAME "localhost"
-#define MAX_RESPONSE_SIZE 65536  // 64 KB
+#define MAX_RESPONSE_SIZE 512  // 512 bytes
 // Cache related constants
 #define MAX_OBJECT_SIZE 512 // object here refers to the posting list or result list being cached
 #define MAX_CACHE_SIZE MAX_OBJECT_SIZE*128
@@ -118,11 +118,6 @@ void request_partition(void) {
     // Close the client file descriptor
     Close(client_fd);
 }
-// 1. Check if key exists in partition
-bool key_exists_in_partition(char* key, int node_id) {
-    char *entry_ptr = find_entry(&partition, key);
-    return (entry_ptr != NULL);
-}
 
 // 2. Check if key exists in cache
 bool key_exists_in_cache(char* key, int node_id) {
@@ -158,17 +153,31 @@ void add_to_cache(char* key, char* value) {
     current_cache_size += MAX_OBJECT_SIZE;
 }
 
-// 3. Forward request to another node and send back the response to the original client
 void forward_request_to_node(char* request, int target_node_id, int original_client_fd) {
     node_info_extended target_node = NODES[target_node_id];
     
     struct sockaddr_in serveraddr;
     int clientfd;
-    rio_t rio, original_rio;
+    rio_t rio;
+    struct timeval timeout;
 
     if ((clientfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
-        perror("Socket error");
-        exit(1);
+        fprintf(stderr, "Socket error: %s\n", strerror(errno));
+        fflush(stderr);
+        return;
+    }
+
+    // Set socket timeout for connect and read operations
+    timeout.tv_sec = CONNECTION_TIMEOUT;
+    timeout.tv_usec = 0;
+    if (setsockopt(clientfd, SOL_SOCKET, SO_RCVTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
+        fprintf(stderr, "Error setting socket read timeout\n");
+        fflush(stderr);
+    }
+
+    if (setsockopt(clientfd, SOL_SOCKET, SO_SNDTIMEO, (char *)&timeout, sizeof(timeout)) < 0) {
+        fprintf(stderr, "Error setting socket write timeout\n");
+        fflush(stderr);
     }
 
     bzero((char*) &serveraddr, sizeof(serveraddr));
@@ -177,22 +186,33 @@ void forward_request_to_node(char* request, int target_node_id, int original_cli
     serveraddr.sin_port = htons(target_node.base_info.port_number);
 
     if (connect(clientfd, (struct sockaddr*) &serveraddr, sizeof(serveraddr)) < 0) {
-        perror("Connect error");
-        exit(1);
+        fprintf(stderr, "Connect error: %s\n", strerror(errno));
+        fflush(stderr);
+        close(clientfd);
+        return;
     }
     Rio_readinitb(&rio, clientfd);
-    Rio_writen(clientfd, request, strlen(request));
-    
-    // Read the response from the target node
+
+    // Append \n to the end of the request
+    char formatted_request[strlen(request) + 2];
+    sprintf(formatted_request, "%s\n", request);
+    Rio_writen(clientfd, formatted_request, strlen(formatted_request));
+
     char response_buffer[MAX_RESPONSE_SIZE];
     ssize_t response_length = Rio_readlineb(&rio, response_buffer, sizeof(response_buffer));
+    if(response_length < 0) {
+        fprintf(stderr, "Error reading from socket. %s\n", strerror(errno));
+        fflush(stderr);
+        close(clientfd);
+        return; 
+    }
 
     // Send the response back to the original client
-    Rio_readinitb(&original_rio, original_client_fd);
     Rio_writen(original_client_fd, response_buffer, response_length);
 
     close(clientfd);
 }
+
 
 void handle_single_request(char* request, int client_fd, int node_id, value_array **value_result) {
     request_line_to_key(request);
@@ -207,8 +227,10 @@ void handle_single_request(char* request, int client_fd, int node_id, value_arra
         if (target_node_id == node_id) {
             *value_result = NULL; // No value found for this request
         } else {
+            fprintf(stderr, "\tForwarding: %s to node %d", request, target_node_id); // Display the content of the request
+            fflush(stderr);
             // Forward request to the target node and get the value array
-            forward_request_to_node(request, target_node_id, value_result);
+            forward_request_to_node(request, target_node_id, client_fd);
         }
     }
 }
@@ -336,6 +358,8 @@ void start_node(int node_id) {
 
   request_partition();
   node_serve();
+  fprintf(stderr, "Node ready to serve!"); // Display the content of the request
+  fflush(stderr);
 }
 
 

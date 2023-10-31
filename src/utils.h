@@ -1,7 +1,12 @@
 #include <sys/types.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
 
+#define CONNECTION_TIMEOUT 50000  // 5 seconds for connection and read timeout
 #define NUM_BUCKETS 8191
 #define KEY_SPACE (((int) 'z') - ((int) '0'))
 #define GET_BUCKET(db, idx) ((db)->h_table->buckets[(idx)])
