@@ -16,3 +16,4 @@ uid: u7156805
 # list numbered references below (replace the example with your own references) 
 ---
 # References
+- [1] Ohad Eytan, Danny Harnik, ect. 2023. It’s Time to Revisit LRU vs. FIFO. Retrieved from https://www.usenix.org/system/files/hotstorage20_paper_eytan.pdf
