@@ -222,9 +222,6 @@ void handle_request(char* request, int client_fd, int node_id) {
     char *token = strtok(request, "\n");
     while (token) {
         queries[num_queries++] = token;
-        // Display the token using fprintf
-        fprintf(stderr, "Token [%d]: %s\n", num_queries, token);    
-        
         token = strtok(NULL, "\n");
     }
 
