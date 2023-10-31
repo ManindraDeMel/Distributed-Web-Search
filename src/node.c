@@ -8,11 +8,10 @@
 // You may assume that all requests sent to a node are less than this length
 #define REQUESTLINELEN 128
 #define HOSTNAME "localhost"
-
+#define MAX_RESPONSE_SIZE 65536  // 64 KB
 // Cache related constants
 #define MAX_OBJECT_SIZE 512 // object here refers to the posting list or result list being cached
 #define MAX_CACHE_SIZE MAX_OBJECT_SIZE*128
-#define PARTITION_SIZE 100
 
 // Assumed data structures
 typedef struct {
@@ -116,16 +115,19 @@ void request_partition(void) {
     // Allocate memory for partition data and read it from the socket
     partition.m_ptr = (char *) Malloc(size);
     Rio_readnb(&rio, partition.m_ptr, size);
-
+    partition.db_size = size;  // Set the database size
+    // Now that the partition data is received, build the hash table for it
+    build_hash_table(&partition);
 
     // Close the client file descriptor
     Close(client_fd);
 }
 // 1. Check if key exists in partition
 bool key_exists_in_partition(char* key, int node_id) {
-    int index = find_entry(&partition, key);
-    return (index != -1);
+    char *entry_ptr = find_entry(&partition, key);
+    return (entry_ptr != NULL);
 }
+
 // 2. Check if key exists in cache
 bool key_exists_in_cache(char* key, int node_id) {
     CacheItem* current = cache_head;
@@ -137,28 +139,6 @@ bool key_exists_in_cache(char* key, int node_id) {
     }
     return false;
 }
-
-/**
- * @brief Determines the target node for the given request.
- * 
- * @param request The request whose target node needs to be determined.
- * @return The ID of the target node.
- */
-int determine_target_node(char* request) {
-    unsigned int hash_value = 0;
-    char *ptr = request;
-    
-    // Simple hash calculation: sum of ASCII values of characters in the request.
-    while (*ptr) {
-        hash_value += *ptr;
-        ptr++;
-    }
-
-    // Modulus with the total number of nodes to get the target node ID.
-    return hash_value % TOTAL_NODES;
-}
-
-
 // Function to remove the oldest item from the cache (LRU eviction)
 void remove_oldest_from_cache() {
     CacheItem* to_remove = cache_head;
@@ -182,14 +162,13 @@ void add_to_cache(char* key, char* value) {
     current_cache_size += MAX_OBJECT_SIZE;
 }
 
-// 3. Forward request to another node
-void forward_request_to_node(char* request, int target_node_id) {
-    // Use NODES[target_node_id] to get the node's metadata
+// 3. Forward request to another node and send back the response to the original client
+void forward_request_to_node(char* request, int target_node_id, int original_client_fd) {
     node_info_extended target_node = NODES[target_node_id];
     
     struct sockaddr_in serveraddr;
     int clientfd;
-    rio_t rio;
+    rio_t rio, original_rio;
 
     if ((clientfd = socket(AF_INET, SOCK_STREAM, 0)) < 0) {
         perror("Socket error");
@@ -205,51 +184,61 @@ void forward_request_to_node(char* request, int target_node_id) {
         perror("Connect error");
         exit(1);
     }
-
     Rio_readinitb(&rio, clientfd);
     Rio_writen(clientfd, request, strlen(request));
     
-    // Not handling response here. You may want to read the response 
-    // and either cache it, or forward it back to the original client.
+    // Read the response from the target node
+    char response_buffer[MAX_RESPONSE_SIZE];
+    ssize_t response_length = Rio_readlineb(&rio, response_buffer, sizeof(response_buffer));
+
+    // Send the response back to the original client
+    Rio_readinitb(&original_rio, original_client_fd);
+    Rio_writen(original_client_fd, response_buffer, response_length);
+
     close(clientfd);
 }
-// void handle_request(char* request, int client_fd, int node_id) {
-//     if (key_exists_in_partition(request, node_id)) {
-//         // Fetch from partition and respond
-//     } else if (key_exists_in_cache(request, node_id)) {
-//         // Fetch from cache and respond
-//     } else {
-//         // Forward to another node or return a graceful failure message
-//         int target_node_id = determine_target_node(request); 
-//         if (NODES[target_node_id].status == LIVE) {
-//             forward_request_to_node(request, target_node_id);
-//         } else {
-//             char failure_msg[] = "Key not found in the system.";
-//             Rio_writen(client_fd, failure_msg, strlen(failure_msg));
-//         }
-//     }
-// }
 void handle_request(char* request, int client_fd, int node_id) {
-    if (key_exists_in_partition(request, node_id)) {
-        // Fetch from partition and respond
-        char success_msg[] = "Key found in the partition.";
-        Rio_writen(client_fd, success_msg, strlen(success_msg));
-        printf("Attempted to write %zu bytes to client. (success in partition)\n", strlen(success_msg));
+    request_line_to_key(request);
+    char *entry;
+    char *response_msg;
+    if ((entry = find_entry(&partition, request)) != NULL) {
+        // Extract value from the entry using get_value_array
+        value_array *values = get_value_array(entry);
+        
+        if (values) {
+            char response_msg[1024]; // Adjust the size as needed
+            int wl = snprintf(response_msg, sizeof(response_msg), "%s", entry); // Start with the entry
+            // Append the associated values to the buffer
+            wl += value_array_to_str(values, response_msg + wl, sizeof(response_msg) - wl);
+            
+            Rio_writen(client_fd, response_msg, wl);
+            fprintf(stderr,"Attempted to write %zu bytes to client. (value: %s)\n", wl, response_msg);
+            fflush(stderr);
+        } else {
+            char failure_msg[] = "Unable to retrieve value from entry.";
+            Rio_writen(client_fd, failure_msg, strlen(failure_msg));
+            fprintf(stderr, "Attempted to write %zu bytes to client. (with failure)\n", strlen(failure_msg));
+            fflush(stderr); 
+        }
 
     } else if (key_exists_in_cache(request, node_id)) {
         // Fetch from cache and respond
         char success_msg[] = "Key found in the cache.";
         Rio_writen(client_fd, success_msg, strlen(success_msg));
-        printf("Attempted to write %zu bytes to client. (success in cache)\n", strlen(success_msg));
+        fprintf(stderr, "Attempted to write %zu bytes to client. (success in cache)\n", strlen(success_msg));
+        fflush(stderr); 
     } else {
         // Forward to another node or return a graceful failure message
-        int target_node_id = determine_target_node(request); 
+        int target_node_id = find_node(request, TOTAL_NODES); 
+        fprintf(stderr, "Forwarding request to node %d", target_node_id);
+        fflush(stderr); 
         if (NODES[target_node_id].status == LIVE) {
-            forward_request_to_node(request, target_node_id);
+            forward_request_to_node(request, target_node_id, client_fd);
         } else {
             char failure_msg[] = "Key not found in the system.";
             Rio_writen(client_fd, failure_msg, strlen(failure_msg));
-            printf("Attempted to write %zu bytes to client. (with failure)\n", strlen(failure_msg));
+            fprintf(stderr, "Attempted to write %zu bytes to client. (with failure)\n", strlen(failure_msg));
+            fflush(stderr); 
         }
     }
 }
@@ -273,7 +262,7 @@ void node_serve(void) {
 
         fprintf(stderr, "Node %d: Received a connection on client_fd %d\n", NODE_ID, client_fd);    
         fflush(stderr); 
-        
+
         Rio_readinitb(&rio, client_fd);
 
         if (Rio_readlineb(&rio, request, REQUESTLINELEN) != 0) {

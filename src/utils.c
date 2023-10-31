@@ -32,9 +32,17 @@ void build_hash_table(database *db) {
   int index;
 
   ht = calloc(1, sizeof(hash_table)); 
+  if(!ht) {
+      // Handle memory allocation failure (shouldnt happen)
+      return;
+  }
   ht->num_buckets = NUM_BUCKETS;
   ht->buckets = calloc(NUM_BUCKETS, sizeof(bucket)); 
-
+  if(!ht->buckets) {
+      // Handle memory allocation failure (shouldnt happen)
+      free(ht);
+      return;
+  }
   while (curr_offset < db->m_ptr + db->db_size) {
     index = lookup_insert(ht, curr_offset); 
     ht->buckets[index].used = 1;
@@ -398,3 +406,5 @@ int port_number_to_str(int port, char *buff) {
   }
   return snprintf(buff, 6, "%d", (unsigned short) port);
 }
+
+// NODE UTILS

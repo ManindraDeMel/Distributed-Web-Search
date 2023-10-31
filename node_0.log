@@ -1,1 +1,4 @@
 Starting node 0...
+Node 0 servingNode 0: Received a connection on client_fd 3
+Node 0 servingNode 0: Received a connection on client_fd 3
+Forwarding request to node 0
