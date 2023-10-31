@@ -306,6 +306,14 @@ void handle_request_wrapper(void* data) {
     rio_t rio;
     Rio_readinitb(&rio, client_fd);
     Rio_readlineb(&rio, request, sizeof(request) - 1);
+
+    // Find length until first '\000' character
+    size_t data_len = strnlen(rio.rio_buf, sizeof(rio.rio_buf));
+
+    // Just copying from rio.rio_buf to our request buffer
+    strncpy(request, rio.rio_buf, data_len);
+    request[data_len] = '\0'; // Null-terminate the request buffer
+    trim_extraneous_chars(request);
     if (strlen(request) > 0) {
         handle_request(request, client_fd, NODE_ID);
     }
