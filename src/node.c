@@ -1,31 +1,16 @@
 #include "csapp/csapp.h"
 #include "utils.h"
-#include <assert.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdbool.h>
+#include <pthread.h>
 
 // You may assume that all requests sent to a node are less than this length
 #define REQUESTLINELEN 128
 #define HOSTNAME "localhost"
 #define MAX_RESPONSE_SIZE 512  // 512 bytes
-// Cache related constants
-#define MAX_OBJECT_SIZE 512 // object here refers to the posting list or result list being cached
-#define MAX_CACHE_SIZE MAX_OBJECT_SIZE*128
 #define MAX_REQUESTS 128
+// Cache related constants
+#define MAX_CACHE_SIZE  MAX_RESPONSE_SIZE * 5 // store up to 5 large entries
+#define MAX_CACHE_ENTRY_SIZE MAX_RESPONSE_SIZE
 // Assumed data structures
-typedef struct {
-    char key[REQUESTLINELEN];
-    char value[MAX_OBJECT_SIZE];
-} KeyValuePair;
-
-// A dynamic list to manage cache. You can use an array but a linked list would allow 
-// more flexibility in cache management, especially for LRU eviction.
-typedef struct CacheItem {
-    KeyValuePair data;
-    struct CacheItem* next;
-} CacheItem;
-
 /* This struct contains all information needed for each node */
 typedef struct node_info {
   int node_id;     // node number
@@ -42,6 +27,25 @@ typedef struct node_info_extended {
     node_info base_info; // Basic node information
     node_status status; // Status of the node (LIVE/DEAD)
 } node_info_extended;
+
+// CACHE
+typedef struct {
+    char* key; // Represents the query string
+    value_array* data; // Response data from the remote server
+    time_t last_accessed; // Timestamp of the last access for LRU
+    int access_count; // Count of how many times this entry was accessed for LFU
+    pthread_rwlock_t lock; // Read-write lock
+} cache_entry_t;
+
+typedef struct {
+    cache_entry_t* entries; // Array of cache entries
+    int max_size; // Maximum number of entries in the cache
+    int current_size; // Current number of entries in the cache
+    int max_entry_size; // Maximum size of each cache entry
+    pthread_rwlock_t lock; // Read-write lock for the cache
+} cache_t;
+
+cache_t global_cache;
 
 /* Variables that all nodes will share */
 
@@ -60,8 +64,84 @@ node_info_extended *NODES = NULL;
 
 /* ------------  Variables specific to each child process / node ------------ */
 
-CacheItem* cache_head = NULL;
-int current_cache_size = 0;
+// CACHE
+
+void cache_init(int max_size, int max_entry_size) {
+    global_cache.entries = (cache_entry_t*)malloc(sizeof(cache_entry_t) * max_size);
+    global_cache.max_size = max_size;
+    global_cache.current_size = 0;
+    global_cache.max_entry_size = max_entry_size;
+    pthread_rwlock_init(&global_cache.lock, NULL);
+}
+
+value_array* cache_search(char* key) {
+    pthread_rwlock_rdlock(&global_cache.lock); // Read lock
+    for (int i = 0; i < global_cache.current_size; i++) {
+        if (strcmp(global_cache.entries[i].key, key) == 0) {
+            global_cache.entries[i].last_accessed = time(NULL); // Update last accessed time
+            global_cache.entries[i].access_count++; // Increment access count for LFU
+            pthread_rwlock_unlock(&global_cache.lock); // Release read lock
+            return global_cache.entries[i].data;
+        }
+    }
+    pthread_rwlock_unlock(&global_cache.lock); // Release read lock
+    return NULL;
+}
+
+void cache_insert(char* key, value_array* data) {
+    if (sizeof(data) > global_cache.max_entry_size) return; // If the data size exceeds max, don't cache
+
+    pthread_rwlock_wrlock(&global_cache.lock); // Write lock
+
+    // Search if the key already exists
+    for (int i = 0; i < global_cache.current_size; i++) {
+        if (strcmp(global_cache.entries[i].key, key) == 0) {
+            global_cache.entries[i].data = data;
+            global_cache.entries[i].last_accessed = time(NULL);
+            global_cache.entries[i].access_count++;
+            pthread_rwlock_unlock(&global_cache.lock); // Release write lock
+            return;
+        }
+    }
+
+    // If cache is full, implement LRU eviction
+    if (global_cache.current_size == global_cache.max_size) {
+        int lru_index = 0;
+        time_t oldest_time = global_cache.entries[0].last_accessed;
+
+        for (int i = 1; i < global_cache.current_size; i++) {
+            if (global_cache.entries[i].last_accessed < oldest_time) {
+                oldest_time = global_cache.entries[i].last_accessed;
+                lru_index = i;
+            }
+        }
+
+        // Free the LRU entry
+        free(global_cache.entries[lru_index].key);
+        // You might also want to free 'data' of the LRU entry if needed
+        // Assuming value_array has a destructor: free_value_array(global_cache.entries[lru_index].data);
+
+        // Shift all entries after the LRU entry to fill the gap
+        for (int j = lru_index; j < global_cache.current_size - 1; j++) {
+            global_cache.entries[j] = global_cache.entries[j + 1];
+        }
+
+        global_cache.current_size--;
+    }
+
+    // Add new cache entry
+    global_cache.entries[global_cache.current_size].key = strdup(key);
+    global_cache.entries[global_cache.current_size].data = data;
+    global_cache.entries[global_cache.current_size].last_accessed = time(NULL);
+    global_cache.entries[global_cache.current_size].access_count = 1;
+    global_cache.current_size++;
+
+    pthread_rwlock_unlock(&global_cache.lock); // Release write lock
+}
+
+void cache_setup() {
+    cache_init(MAX_CACHE_SIZE, MAX_CACHE_ENTRY_SIZE);
+}
 
 // After forking each node (one child process) changes the value of this variable
 // to their own node id.
@@ -118,41 +198,6 @@ void request_partition(void) {
     // Close the client file descriptor
     Close(client_fd);
 }
-
-// 2. Check if key exists in cache
-bool key_exists_in_cache(char* key, int node_id) {
-    CacheItem* current = cache_head;
-    while (current != NULL) {
-        if (strcmp(current->data.key, key) == 0) {
-            return true;
-        }
-        current = current->next;
-    }
-    return false;
-}
-// Function to remove the oldest item from the cache (LRU eviction)
-void remove_oldest_from_cache() {
-    CacheItem* to_remove = cache_head;
-    cache_head = cache_head->next;
-    free(to_remove);
-    current_cache_size -= MAX_OBJECT_SIZE; // Assume each cache item uses the full object size
-}
-
-// Add an item to cache
-void add_to_cache(char* key, char* value) {
-    if (current_cache_size + MAX_OBJECT_SIZE > MAX_CACHE_SIZE) {
-        remove_oldest_from_cache();
-    }
-
-    CacheItem* new_item = malloc(sizeof(CacheItem));
-    strncpy(new_item->data.key, key, REQUESTLINELEN);
-    strncpy(new_item->data.value, value, MAX_OBJECT_SIZE);
-    new_item->next = cache_head;
-    cache_head = new_item;
-
-    current_cache_size += MAX_OBJECT_SIZE;
-}
-
 value_array* forward_request_to_node(char* request, int target_node_id) {
     node_info_extended target_node = NODES[target_node_id];
     
@@ -214,16 +259,20 @@ value_array* forward_request_to_node(char* request, int target_node_id) {
     return response_va;
 }
 
-
 void handle_single_request(char* request, int client_fd, int node_id, value_array **value_result) {
     request_line_to_key(request);
     char *entry;
-    if ((entry = find_entry(&partition, request)) != NULL) {
+
+    // Check in the cache first
+    *value_result = cache_search(request);
+    if (*value_result) {
+        return; // Value found in cache, return early
+    }
+    else if ((entry = find_entry(&partition, request)) != NULL) {
         *value_result = get_value_array(entry);
-    } else if (key_exists_in_cache(request, node_id)) {
-        // TODO: Retrieve value array from cache if needed
-        *value_result = NULL; // Placeholder
-    } else {
+        cache_insert(request, *value_result);
+    } 
+    else {
         int target_node_id = find_node(request, TOTAL_NODES); 
         if (target_node_id == node_id) {
             *value_result = NULL; // No value found for this request
@@ -232,9 +281,14 @@ void handle_single_request(char* request, int client_fd, int node_id, value_arra
             fflush(stderr);
             // Forward request to the target node and get the value array
             *value_result = forward_request_to_node(request, target_node_id);
+            // Update the cache
+            if (*value_result) {
+                cache_insert(request, *value_result);
+            }
         }
     }
 }
+
 void handle_request(char* request, int client_fd, int node_id) {
     char* queries[MAX_REQUESTS]; // Assuming some max number of simultaneous requests
     int num_queries = 0;
@@ -364,7 +418,7 @@ void start_node(int node_id) {
     if (n != NODE_ID)
       Close(NODES[n].base_info.listen_fd);
   }
-
+  cache_setup(); // Initialize the cache
   request_partition();
   node_serve();
   fprintf(stderr, "Node ready to serve!"); // Display the content of the request
