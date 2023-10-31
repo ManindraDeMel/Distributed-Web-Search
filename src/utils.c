@@ -408,6 +408,10 @@ int port_number_to_str(int port, char *buff) {
 }
 
 // NODE UTILS
+/** @brief  Trims any characters following the last newline character in a string.
+ * 
+ *  @param  str The string to be trimmed. The function modifies this string in place.
+ */
 void trim_extraneous_chars(char *str) {
     char *last_newline = strrchr(str, '\n'); // Find last occurrence of newline
     if (last_newline) {
@@ -418,7 +422,11 @@ void trim_extraneous_chars(char *str) {
 
 // THREADS
 
-// Thread function
+/** @brief  The main function to be run by each worker thread in the thread pool.
+ * 
+ *  @param  threadpool A pointer to the threadpool_t struct representing the thread pool.
+ *  @return NULL.
+ */
 void* threadpool_thread(void* threadpool) {
     threadpool_t* pool = (threadpool_t*)threadpool;
     threadpool_task_t task;
@@ -452,7 +460,12 @@ void* threadpool_thread(void* threadpool) {
     pthread_exit(NULL);
     return (NULL);
 }
-
+/** @brief  Creates a new thread pool.
+ * 
+ *  @param  thread_count The number of worker threads to create.
+ *  @param  queue_size   The size of the task queue.
+ *  @return A pointer to the newly created thread pool, or NULL if an error occurs.
+ */
 threadpool_t* threadpool_create(int thread_count, int queue_size) {
     threadpool_t* pool;
     int i;
@@ -491,7 +504,13 @@ threadpool_t* threadpool_create(int thread_count, int queue_size) {
     }
     return NULL;
 }
-
+/** @brief  Adds a new task to the thread pool's task queue.
+ * 
+ *  @param  pool     A pointer to the threadpool_t struct representing the thread pool.
+ *  @param  function The function to be executed by a worker thread.
+ *  @param  data     The data to be passed to the function.
+ *  @return 0 if the task is added successfully, or -1 otherwise.
+ */
 int threadpool_add(threadpool_t* pool, void (*function)(void*), void* data) {
     int err = 0;
     if (pool == NULL || function == NULL) {
@@ -521,7 +540,12 @@ int threadpool_add(threadpool_t* pool, void (*function)(void*), void* data) {
 
     return err;
 }
-
+/** @brief  Destroys the thread pool.
+ * 
+ *  @param  pool  A pointer to the threadpool_t struct representing the thread pool.
+ *  @param  flags Flags to indicate the shutdown mode (graceful or immediate).
+ *  @return 0 if the pool is destroyed successfully, or -1 otherwise.
+ */
 int threadpool_destroy(threadpool_t* pool, int flags) {
     int i, err = 0;
 
@@ -555,7 +579,10 @@ int threadpool_destroy(threadpool_t* pool, int flags) {
     return err;
 }
 
-// Free function to cleanup dynamically allocated memory
+/** @brief  Frees all dynamically allocated resources used by the thread pool.
+ * 
+ *  @param  pool A pointer to the threadpool_t struct representing the thread pool.
+ */
 void threadpool_free(threadpool_t* pool) {
     if (pool == NULL) {
         return;

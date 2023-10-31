@@ -65,7 +65,13 @@ node_info_extended *NODES = NULL;
 /* ------------  Variables specific to each child process / node ------------ */
 
 // CACHE
-
+/**
+ * @brief  Initializes the global cache with the given maximum size and maximum entry size.
+ *         Also initializes the read-write lock for the global cache.
+ * 
+ * @param  max_size The maximum number of entries that can be stored in the cache.
+ * @param  max_entry_size The maximum size (in bytes) of each entry in the cache.
+ */
 void cache_init(int max_size, int max_entry_size) {
     global_cache.entries = (cache_entry_t*)malloc(sizeof(cache_entry_t) * max_size);
     global_cache.max_size = max_size;
@@ -73,7 +79,13 @@ void cache_init(int max_size, int max_entry_size) {
     global_cache.max_entry_size = max_entry_size;
     pthread_rwlock_init(&global_cache.lock, NULL);
 }
-
+/**
+ * @brief  Searches for a value associated with a given key in the cache.
+ *         This operation is read-locked to allow multiple threads to read concurrently.
+ * 
+ * @param  key The key to search for in the cache.
+ * @return The value_array corresponding to the key, or NULL if the key is not found.
+ */
 value_array* cache_search(char* key) {
     pthread_rwlock_rdlock(&global_cache.lock); // Read lock
     for (int i = 0; i < global_cache.current_size; i++) {
@@ -87,7 +99,13 @@ value_array* cache_search(char* key) {
     pthread_rwlock_unlock(&global_cache.lock); // Release read lock
     return NULL;
 }
-
+/**
+ * @brief  Inserts a key-value pair into the global cache.
+ *         This operation is write-locked to ensure that only one thread modifies the cache at a time.
+ * 
+ * @param  key The key to insert into the cache.
+ * @param  data The value_array corresponding to the key.
+ */
 void cache_insert(char* key, value_array* data) {
     if (sizeof(data) > global_cache.max_entry_size) return; // If the data size exceeds max, don't cache
 
@@ -138,7 +156,9 @@ void cache_insert(char* key, value_array* data) {
 
     pthread_rwlock_unlock(&global_cache.lock); // Release write lock
 }
-
+/**
+ * @brief  Sets up the cache by initializing it with defined maximum sizes.
+ */
 void cache_setup() {
     cache_init(MAX_CACHE_SIZE, MAX_CACHE_ENTRY_SIZE);
 }
@@ -198,6 +218,14 @@ void request_partition(void) {
     // Close the client file descriptor
     Close(client_fd);
 }
+/**
+ * @brief  Forwards a request to another node identified by its ID.
+ *         Connects to the target node, sends the request, and receives the response.
+ * 
+ * @param  request The query to forward.
+ * @param  target_node_id ID of the target node.
+ * @return Pointer to the value_array containing the result of the forwarded request.
+ */
 value_array* forward_request_to_node(char* request, int target_node_id) {
     node_info_extended target_node = NODES[target_node_id];
     
@@ -258,7 +286,14 @@ value_array* forward_request_to_node(char* request, int target_node_id) {
     // Return the value_array
     return response_va;
 }
-
+/**
+ * @brief  Handles a single query within a client request.
+ * 
+ * @param  request The query to handle.
+ * @param  client_fd File descriptor for the client connection.
+ * @param  node_id ID of the node handling the request.
+ * @param  value_result Pointer to a value_array to store the result of the query.
+ */
 void handle_single_request(char* request, int client_fd, int node_id, value_array **value_result) {
     request_line_to_key(request);
     char *entry;
@@ -288,7 +323,13 @@ void handle_single_request(char* request, int client_fd, int node_id, value_arra
         }
     }
 }
-
+/**
+ * @brief  Processes a client request, separates it into individual queries, and constructs a response.
+ * 
+ * @param  request The client request as a string.
+ * @param  client_fd File descriptor for the client connection.
+ * @param  node_id ID of the node handling the request.
+ */
 void handle_request(char* request, int client_fd, int node_id) {
     char* queries[MAX_REQUESTS]; // Assuming some max number of simultaneous requests
     int num_queries = 0;
@@ -354,7 +395,12 @@ void handle_request(char* request, int client_fd, int node_id) {
     Rio_writen(client_fd, response_msg, wl);
 }
 
-
+/**
+ * @brief  Wrapper function that handles client requests.
+ *         Reads data from a given client file descriptor, processes the request, and calls handle_request().
+ * 
+ * @param  data Void pointer that should point to a client file descriptor.
+ */
 void handle_request_wrapper(void* data) {
     int client_fd = (int)(intptr_t)data;
     char request[REQUESTLINELEN] = {0};
